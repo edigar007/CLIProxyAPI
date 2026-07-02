@@ -501,6 +501,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 			entry["account"] = account
 		}
 	}
+	if isCodexPersonalAccessTokenMetadata(auth.Metadata) {
+		entry["account_type"] = "personal_access_token"
+	}
 	if !auth.CreatedAt.IsZero() {
 		entry["created_at"] = auth.CreatedAt
 	}
@@ -680,6 +683,14 @@ func authEmail(auth *coreauth.Auth) string {
 	return ""
 }
 
+func isCodexPersonalAccessTokenMetadata(metadata map[string]any) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	v, ok := metadata["personal_access_token"].(string)
+	return ok && strings.TrimSpace(v) != ""
+}
+
 func authAttribute(auth *coreauth.Auth, key string) string {
 	if auth == nil || len(auth.Attributes) == 0 {
 		return ""
@@ -811,6 +822,131 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	c.JSON(200, gin.H{"status": "ok"})
+}
+
+type importCodexPersonalAccessTokenRequest struct {
+	AccessToken string `json:"access_token"`
+	Name        string `json:"name"`
+	ProxyURL    string `json:"proxy_url"`
+	Note        string `json:"note"`
+	Priority    *int   `json:"priority"`
+	Disabled    *bool  `json:"disabled"`
+}
+
+func (h *Handler) ImportCodexPersonalAccessToken(c *gin.Context) {
+	if h == nil || h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req importCodexPersonalAccessTokenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	accessToken := strings.TrimSpace(req.AccessToken)
+	if !codex.IsPersonalAccessToken(accessToken) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "access_token must be an official Codex personal access token starting with at-"})
+		return
+	}
+
+	proxyURL := strings.TrimSpace(req.ProxyURL)
+	patMetadata, err := codex.LoadPersonalAccessTokenMetadata(c.Request.Context(), h.cfg, proxyURL, accessToken)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("failed to validate Codex personal access token: %v", err)})
+		return
+	}
+
+	planType := strings.ToLower(strings.TrimSpace(patMetadata.ChatgptPlanType))
+	if !codexPersonalAccessTokenPlanAllowed(planType) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Codex personal access token import is limited to team/business/enterprise workspaces"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = codex.CredentialFileName(strings.TrimSpace(patMetadata.Email), planType, shortCodexAccountIDHash(patMetadata.ChatgptAccountID), true)
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		name += ".json"
+	}
+	if isUnsafeAuthFileName(name) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid name"})
+		return
+	}
+
+	disabled := false
+	if req.Disabled != nil {
+		disabled = *req.Disabled
+	}
+
+	fileMetadata := map[string]any{
+		"type":                       "codex",
+		"email":                      strings.TrimSpace(patMetadata.Email),
+		"account_id":                 strings.TrimSpace(patMetadata.ChatgptAccountID),
+		"chatgpt_account_id":         strings.TrimSpace(patMetadata.ChatgptAccountID),
+		"chatgpt_user_id":            strings.TrimSpace(patMetadata.ChatgptUserID),
+		"plan_type":                  planType,
+		"chatgpt_plan_type":          planType,
+		"chatgpt_account_is_fedramp": patMetadata.ChatgptAccountIsFedramp,
+		"personal_access_token":      accessToken,
+		"disabled":                   disabled,
+	}
+	if proxyURL != "" {
+		fileMetadata["proxy_url"] = proxyURL
+	}
+	if note := strings.TrimSpace(req.Note); note != "" {
+		fileMetadata["note"] = note
+	}
+	if req.Priority != nil {
+		fileMetadata["priority"] = *req.Priority
+	}
+
+	raw, err := json.Marshal(fileMetadata)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to serialize auth file"})
+		return
+	}
+	if err = h.writeAuthFile(c.Request.Context(), filepath.Base(name), raw); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	entry := gin.H{
+		"status":             "ok",
+		"name":               filepath.Base(name),
+		"email":              strings.TrimSpace(patMetadata.Email),
+		"account_id":         strings.TrimSpace(patMetadata.ChatgptAccountID),
+		"chatgpt_account_id": strings.TrimSpace(patMetadata.ChatgptAccountID),
+		"chatgpt_user_id":    strings.TrimSpace(patMetadata.ChatgptUserID),
+		"plan_type":          planType,
+		"account_type":       "personal_access_token",
+		"disabled":           disabled,
+	}
+	if auth := h.findAuthForDelete(filepath.Base(name)); auth != nil {
+		auth.EnsureIndex()
+		entry["auth_index"] = auth.Index
+	}
+	c.JSON(http.StatusOK, entry)
+}
+
+func codexPersonalAccessTokenPlanAllowed(planType string) bool {
+	switch strings.ToLower(strings.TrimSpace(planType)) {
+	case "team", "business", "enterprise":
+		return true
+	default:
+		return false
+	}
+}
+
+func shortCodexAccountIDHash(accountID string) string {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(accountID))
+	return hex.EncodeToString(digest[:])[:8]
 }
 
 // Delete auth files: single by name or all

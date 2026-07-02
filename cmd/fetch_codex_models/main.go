@@ -170,7 +170,7 @@ func findCodexAuth(auths []*coreauth.Auth) *coreauth.Auth {
 		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 			continue
 		}
-		if metaStringValue(auth.Metadata, "access_token") == "" && metaStringValue(auth.Metadata, "refresh_token") == "" {
+		if metaStringValue(auth.Metadata, "personal_access_token") == "" && metaStringValue(auth.Metadata, "access_token") == "" && metaStringValue(auth.Metadata, "refresh_token") == "" {
 			continue
 		}
 		return auth
@@ -179,6 +179,11 @@ func findCodexAuth(auths []*coreauth.Auth) *coreauth.Auth {
 }
 
 func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth *coreauth.Auth) (string, bool, error) {
+	personalAccessToken := metaStringValue(auth.Metadata, "personal_access_token")
+	if personalAccessToken != "" {
+		return personalAccessToken, false, nil
+	}
+
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	if accessToken != "" {
 		if expiresAt, ok := auth.ExpirationTime(); !ok || time.Now().Add(accessTokenRefreshLeeway).Before(expiresAt) {

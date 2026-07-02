@@ -411,6 +411,9 @@ func tokenValueFromMetadata(metadata map[string]any) string {
 	if len(metadata) == 0 {
 		return ""
 	}
+	if v, ok := metadata["personal_access_token"].(string); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
 	if v, ok := metadata["accessToken"].(string); ok && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)
 	}

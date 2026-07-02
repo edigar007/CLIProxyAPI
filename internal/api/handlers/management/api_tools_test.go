@@ -210,3 +210,15 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
 	}
 }
+
+func TestTokenValueFromMetadataPrefersPersonalAccessToken(t *testing.T) {
+	t.Parallel()
+
+	got := tokenValueFromMetadata(map[string]any{
+		"personal_access_token": "at-test-token",
+		"access_token":          "jwt-access-token",
+	})
+	if got != "at-test-token" {
+		t.Fatalf("tokenValueFromMetadata() = %q, want at-test-token", got)
+	}
+}

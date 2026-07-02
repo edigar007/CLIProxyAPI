@@ -3,6 +3,8 @@ package synthesizer
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -159,6 +161,64 @@ func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	}
 	if len(auths) != 0 {
 		t.Fatalf("expected Gemini auth file to be ignored, got %d auths", len(auths))
+	}
+}
+
+func TestSynthesizeAuthFileHydratesCodexPersonalAccessTokenMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/user-auth-credential/whoami" {
+			t.Fatalf("path = %q, want /v1/user-auth-credential/whoami", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer at-test-token" {
+			t.Fatalf("Authorization = %q, want Bearer at-test-token", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"email":"pat@example.com","chatgpt_user_id":"user-pat","chatgpt_account_id":"workspace-123","chatgpt_plan_type":"enterprise","chatgpt_account_is_fedramp":true}`))
+	}))
+	defer server.Close()
+	t.Setenv("CODEX_AUTHAPI_BASE_URL", server.URL)
+
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "codex-pat.json")
+	raw := []byte(`{"type":"codex","personal_access_token":"at-test-token","disabled":false}`)
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths := SynthesizeAuthFile(ctx, fullPath, raw)
+	if len(auths) != 1 {
+		t.Fatalf("SynthesizeAuthFile() len = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if auth.Label != "pat@example.com" {
+		t.Fatalf("label = %q, want pat@example.com", auth.Label)
+	}
+	if got := auth.Metadata["email"]; got != "pat@example.com" {
+		t.Fatalf("metadata email = %#v, want pat@example.com", got)
+	}
+	if got := auth.Metadata["chatgpt_user_id"]; got != "user-pat" {
+		t.Fatalf("metadata chatgpt_user_id = %#v, want user-pat", got)
+	}
+	if got := auth.Metadata["account_id"]; got != "workspace-123" {
+		t.Fatalf("metadata account_id = %#v, want workspace-123", got)
+	}
+	if got := auth.Metadata["chatgpt_account_id"]; got != "workspace-123" {
+		t.Fatalf("metadata chatgpt_account_id = %#v, want workspace-123", got)
+	}
+	if got := auth.Metadata["plan_type"]; got != "enterprise" {
+		t.Fatalf("metadata plan_type = %#v, want enterprise", got)
+	}
+	if got := auth.Metadata["chatgpt_plan_type"]; got != "enterprise" {
+		t.Fatalf("metadata chatgpt_plan_type = %#v, want enterprise", got)
+	}
+	if got := auth.Attributes["plan_type"]; got != "enterprise" {
+		t.Fatalf("attribute plan_type = %q, want enterprise", got)
+	}
+	if got, ok := auth.Metadata["chatgpt_account_is_fedramp"].(bool); !ok || !got {
+		t.Fatalf("metadata chatgpt_account_is_fedramp = %#v, want true", auth.Metadata["chatgpt_account_is_fedramp"])
 	}
 }
 

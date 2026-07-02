@@ -241,6 +241,42 @@ func TestApplyCodexHeadersUsesAccountHeaderForOAuth(t *testing.T) {
 	}
 }
 
+func TestCodexCredsPrefersPersonalAccessTokenOverAccessToken(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"personal_access_token": "at-test-token",
+			"access_token":          "jwt-access-token",
+		},
+	}
+
+	apiKey, baseURL := codexCreds(auth)
+	if apiKey != "at-test-token" {
+		t.Fatalf("apiKey = %q, want at-test-token", apiKey)
+	}
+	if baseURL != "" {
+		t.Fatalf("baseURL = %q, want empty", baseURL)
+	}
+}
+
+func TestCodexCredsUsesMetadataBaseURL(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"personal_access_token": "at-test-token",
+			"base_url":              "https://example.com/backend-api/codex",
+		},
+	}
+
+	apiKey, baseURL := codexCreds(auth)
+	if apiKey != "at-test-token" {
+		t.Fatalf("apiKey = %q, want at-test-token", apiKey)
+	}
+	if baseURL != "https://example.com/backend-api/codex" {
+		t.Fatalf("baseURL = %q, want https://example.com/backend-api/codex", baseURL)
+	}
+}
+
 func TestCodexIdentityConfuseKeepsClientBodySeparateFromUpstreamBody(t *testing.T) {
 	cfg := &config.Config{
 		Routing: config.RoutingConfig{Strategy: "fill-first"},

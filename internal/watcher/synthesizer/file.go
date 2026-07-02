@@ -80,6 +80,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	if provider == "gemini" {
 		provider = "gemini-cli"
 	}
+	if provider == "codex" {
+		hydrateCodexPersonalAccessTokenMetadata(cfg, metadata)
+	}
 	if ctx.PluginAuthParser != nil {
 		auths, handled, errParse := parsePluginFileAuths(ctx.PluginAuthParser, pluginapi.AuthParseRequest{
 			Provider: provider,
@@ -198,9 +201,11 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	coreauth.ApplyCustomHeadersFromMetadata(a)
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
-	// For codex auth files, extract plan_type from the JWT id_token.
+	// For codex auth files, prefer explicit plan metadata and fall back to id_token parsing.
 	if provider == "codex" {
-		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
+		if planType := firstNonEmptyMetadataString(metadata, "plan_type", "chatgpt_plan_type"); planType != "" {
+			a.Attributes["plan_type"] = planType
+		} else if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
 			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
 				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
 					a.Attributes["plan_type"] = pt
@@ -209,6 +214,79 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		}
 	}
 	return []*coreauth.Auth{a}
+}
+
+func hydrateCodexPersonalAccessTokenMetadata(cfg *config.Config, metadata map[string]any) {
+	if len(metadata) == 0 {
+		return
+	}
+	accessToken := metadataStringValue(metadata, "personal_access_token")
+	if !codex.IsPersonalAccessToken(accessToken) {
+		return
+	}
+	if codexPersonalAccessTokenMetadataComplete(metadata) {
+		return
+	}
+
+	patMetadata, err := codex.LoadPersonalAccessTokenMetadata(context.Background(), cfg, metadataStringValue(metadata, "proxy_url"), accessToken)
+	if err != nil || patMetadata == nil {
+		return
+	}
+	if metadataStringValue(metadata, "email") == "" && patMetadata.Email != "" {
+		metadata["email"] = patMetadata.Email
+	}
+	if metadataStringValue(metadata, "chatgpt_user_id") == "" && patMetadata.ChatgptUserID != "" {
+		metadata["chatgpt_user_id"] = patMetadata.ChatgptUserID
+	}
+	if metadataStringValue(metadata, "account_id") == "" && patMetadata.ChatgptAccountID != "" {
+		metadata["account_id"] = patMetadata.ChatgptAccountID
+	}
+	if metadataStringValue(metadata, "chatgpt_account_id") == "" && patMetadata.ChatgptAccountID != "" {
+		metadata["chatgpt_account_id"] = patMetadata.ChatgptAccountID
+	}
+	if metadataStringValue(metadata, "plan_type") == "" && patMetadata.ChatgptPlanType != "" {
+		metadata["plan_type"] = patMetadata.ChatgptPlanType
+	}
+	if metadataStringValue(metadata, "chatgpt_plan_type") == "" && patMetadata.ChatgptPlanType != "" {
+		metadata["chatgpt_plan_type"] = patMetadata.ChatgptPlanType
+	}
+	if _, ok := metadata["chatgpt_account_is_fedramp"]; !ok {
+		metadata["chatgpt_account_is_fedramp"] = patMetadata.ChatgptAccountIsFedramp
+	}
+}
+
+func codexPersonalAccessTokenMetadataComplete(metadata map[string]any) bool {
+	accountID := firstNonEmptyMetadataString(metadata, "account_id", "chatgpt_account_id")
+	planType := firstNonEmptyMetadataString(metadata, "plan_type", "chatgpt_plan_type")
+	email := metadataStringValue(metadata, "email")
+	return accountID != "" && planType != "" && email != ""
+}
+
+func firstNonEmptyMetadataString(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := metadataStringValue(metadata, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func metadataStringValue(metadata map[string]any, key string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	raw, ok := metadata[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
 }
 
 func parsePluginFileAuths(parser PluginAuthParser, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {

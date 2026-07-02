@@ -1861,9 +1861,13 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		baseURL = a.Attributes["base_url"]
 	}
 	if apiKey == "" && a.Metadata != nil {
-		if v, ok := a.Metadata["access_token"].(string); ok {
-			apiKey = v
+		apiKey = metadataString(a.Metadata, "personal_access_token")
+		if apiKey == "" {
+			apiKey = metadataString(a.Metadata, "access_token")
 		}
+	}
+	if baseURL == "" && a.Metadata != nil {
+		baseURL = metadataString(a.Metadata, "base_url")
 	}
 	return
 }

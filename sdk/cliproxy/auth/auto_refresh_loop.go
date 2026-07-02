@@ -343,6 +343,10 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 
+	if isCodexPersonalAccessTokenAuth(auth) {
+		return time.Time{}, false
+	}
+
 	if auth.AuthKind() == AuthKindAPIKey {
 		return time.Time{}, false
 	}
@@ -411,6 +415,14 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return dueAt, true
 	}
 	return now, true
+}
+
+func isCodexPersonalAccessTokenAuth(auth *Auth) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || len(auth.Metadata) == 0 {
+		return false
+	}
+	v, ok := auth.Metadata["personal_access_token"].(string)
+	return ok && strings.TrimSpace(v) != ""
 }
 
 type refreshHeapItem struct {

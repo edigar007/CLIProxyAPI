@@ -70,6 +70,21 @@ func TestNextRefreshCheckAt_APIKeyUnschedule(t *testing.T) {
 	}
 }
 
+func TestNextRefreshCheckAt_CodexPersonalAccessTokenUnschedule(t *testing.T) {
+	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
+	auth := &Auth{
+		ID:       "a1",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"personal_access_token": "at-test-token",
+			"email":                 "user@example.com",
+		},
+	}
+	if _, ok := nextRefreshCheckAt(now, auth, 15*time.Minute); ok {
+		t.Fatalf("nextRefreshCheckAt() ok = true, want false")
+	}
+}
+
 func TestNextRefreshCheckAt_NextRefreshAfterGate(t *testing.T) {
 	now := time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC)
 	nextAfter := now.Add(30 * time.Minute)
