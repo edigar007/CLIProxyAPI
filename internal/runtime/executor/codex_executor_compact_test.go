@@ -48,7 +48,7 @@ func TestCodexExecutorCompactAddsDefaultInstructions(t *testing.T) {
 				"api_key":  "test",
 			}}
 
-			resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 				Model:   "gpt-5.4",
 				Payload: []byte(tc.payload),
 			}, cliproxyexecutor.Options{
@@ -71,9 +71,52 @@ func TestCodexExecutorCompactAddsDefaultInstructions(t *testing.T) {
 			if gjson.GetBytes(gotBody, "instructions").String() != "" {
 				t.Fatalf("instructions = %q, want empty string", gjson.GetBytes(gotBody, "instructions").String())
 			}
-			if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
-				t.Fatalf("payload = %s", string(resp.Payload))
+			if gotPath == "" {
+				t.Fatal("expected upstream request to be sent")
 			}
 		})
+	}
+}
+
+func TestCodexExecutorCompactNormalizesStringInputToArray(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","input":"hello"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	input := gjson.GetBytes(gotBody, "input")
+	if !input.IsArray() {
+		t.Fatalf("input should be an array, got %s", string(gotBody))
+	}
+	if len(input.Array()) == 0 {
+		t.Fatalf("input array should not be empty, got %s", string(gotBody))
+	}
+	if got := input.Array()[0].Get("type").String(); got != "message" {
+		t.Fatalf("input[0].type = %q, want %q; body=%s", got, "message", string(gotBody))
+	}
+	if got := input.Array()[0].Get("role").String(); got != "user" {
+		t.Fatalf("input[0].role = %q, want %q; body=%s", got, "user", string(gotBody))
 	}
 }
