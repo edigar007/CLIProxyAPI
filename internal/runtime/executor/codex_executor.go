@@ -773,21 +773,28 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	faithful := codexFaithfulPassthrough(auth)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
+	if !faithful {
+		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+		body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+		body, _ = sjson.DeleteBytes(body, "safety_identifier")
+		body, _ = sjson.DeleteBytes(body, "stream_options")
+	}
 	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+	if !faithful && (e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff) {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCallsForTools(body)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
-	if errReplay != nil {
-		return resp, errReplay
+	var replayScope codexReasoningReplayScope
+	if !faithful {
+		var errReplay error
+		body, replayScope, errReplay = applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+		if errReplay != nil {
+			return resp, errReplay
+		}
 	}
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
@@ -797,8 +804,12 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if err != nil {
 		return resp, err
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
-	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	if faithful {
+		applyCodexFaithfulHeaders(httpReq, auth, apiKey)
+	} else {
+		applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+		applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -953,10 +964,11 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	faithful := codexFaithfulPassthrough(auth)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+	if !faithful && (e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff) {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
@@ -969,8 +981,12 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return resp, err
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
-	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	if faithful {
+		applyCodexFaithfulHeaders(httpReq, auth, apiKey)
+	} else {
+		applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
+		applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -1060,20 +1076,27 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
+	faithful := codexFaithfulPassthrough(auth)
+	if !faithful {
+		body, _ = sjson.DeleteBytes(body, "previous_response_id")
+		body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+		body, _ = sjson.DeleteBytes(body, "safety_identifier")
+		body, _ = sjson.DeleteBytes(body, "stream_options")
+	}
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+	if !faithful && (e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff) {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCallsForTools(body)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
-	if errReplay != nil {
-		return nil, errReplay
+	var replayScope codexReasoningReplayScope
+	if !faithful {
+		var errReplay error
+		body, replayScope, errReplay = applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+		if errReplay != nil {
+			return nil, errReplay
+		}
 	}
 	reporter.SetTranslatedReasoningEffort(body, to.String())
 
@@ -1083,8 +1106,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		return nil, err
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
-	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	if faithful {
+		applyCodexFaithfulHeaders(httpReq, auth, apiKey)
+	} else {
+		applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+		applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -1417,6 +1444,16 @@ type codexIdentityReplacement struct {
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, userPayload []byte, rawJSON []byte) (*http.Request, []byte, codexIdentityConfuseState, error) {
+	// Faithful passthrough: forward the body untouched, no prompt-cache-key
+	// injection, no identity-confuse, no Session_id synthesis.
+	if codexFaithfulPassthrough(auth) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(rawJSON))
+		if err != nil {
+			return nil, nil, codexIdentityConfuseState{}, err
+		}
+		return httpReq, rawJSON, codexIdentityConfuseState{}, nil
+	}
+
 	var cache helps.CodexCache
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
 		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, req.Model, req.Payload, nil)
@@ -1850,6 +1887,77 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 		return &retryAfter
 	}
 	return nil
+}
+
+// codexFaithfulPassthrough reports whether the credential opts into faithful
+// passthrough: the incoming Codex request is forwarded essentially untouched
+// (only Authorization + ChatGPT-Account-Id are swapped), bypassing image tool
+// injection, reasoning-replay, and identity-confuse rewrites. This keeps the
+// upstream request indistinguishable from real Codex CLI/Desktop traffic.
+func codexFaithfulPassthrough(a *cliproxyauth.Auth) bool {
+	if a == nil || len(a.Metadata) == 0 {
+		return false
+	}
+	for _, key := range []string{"codex_faithful", "faithful_passthrough"} {
+		switch v := a.Metadata[key].(type) {
+		case bool:
+			if v {
+				return true
+			}
+		case string:
+			if strings.EqualFold(strings.TrimSpace(v), "true") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// applyCodexFaithfulHeaders forwards the client's own headers and only swaps the
+// credential-scoped values (Authorization bearer, ChatGPT-Account-Id). It does
+// not override User-Agent/Originator with CPA defaults and does not synthesize a
+// Session_id, so the upstream request matches what the client actually sent.
+func applyCodexFaithfulHeaders(r *http.Request, auth *cliproxyauth.Auth, token string) {
+	var ginHeaders http.Header
+	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		ginHeaders = ginCtx.Request.Header
+	}
+
+	// Preserve client headers verbatim when available.
+	if ginHeaders != nil {
+		for key, values := range ginHeaders {
+			switch http.CanonicalHeaderKey(key) {
+			case "Authorization", "Host", "Content-Length", "Accept-Encoding":
+				continue
+			}
+			r.Header.Del(key)
+			for _, v := range values {
+				r.Header.Add(key, v)
+			}
+		}
+	}
+
+	if strings.TrimSpace(r.Header.Get("Content-Type")) == "" {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	if strings.TrimSpace(token) != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	if auth != nil && auth.Metadata != nil {
+		accountID := metadataString(auth.Metadata, "account_id")
+		if accountID == "" {
+			accountID = metadataString(auth.Metadata, "chatgpt_account_id")
+		}
+		if accountID != "" {
+			r.Header.Set("Chatgpt-Account-Id", accountID)
+		}
+	}
+
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(r, attrs)
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
