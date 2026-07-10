@@ -5,6 +5,7 @@ package management
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -17,11 +18,15 @@ import (
 
 const codexUsageTokenRefreshLeeway = 30 * time.Second
 
-// GetCodexUsage reads Codex usage/quota for a specific credential.
+// GetCodexUsage reads Codex usage/quota for one credential or, when no identifier
+// is provided, for every faithful-mode Codex credential.
 //
 // Endpoint:
 //
 //	GET /v0/management/codex-usage?auth_index=<index>
+//	GET /v0/management/codex-usage?email=<email>
+//	GET /v0/management/codex-usage?account_id=<account_id>
+//	GET /v0/management/codex-usage            (batch: all codex_faithful configs)
 //
 // It sends the same read-only request the Codex CLI uses and returns the upstream
 // status code and JSON body verbatim. It does not call any execution endpoint.
@@ -35,24 +40,83 @@ func (h *Handler) GetCodexUsage(c *gin.Context) {
 	if authIndex == "" {
 		authIndex = strings.TrimSpace(c.Query("authIndex"))
 	}
-	auth := h.authByIndex(authIndex)
-	if auth == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found for auth_index"})
-		return
+	email := strings.TrimSpace(c.Query("email"))
+	accountID := strings.TrimSpace(c.Query("account_id"))
+	if accountID == "" {
+		accountID = strings.TrimSpace(c.Query("accountId"))
 	}
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "auth is not a codex credential"})
+
+	// Batch mode: no identifier -> query every faithful-mode codex credential.
+	if authIndex == "" && email == "" && accountID == "" {
+		h.getCodexUsageBatch(c)
 		return
 	}
 
-	accessToken, errToken := h.ensureCodexAccessToken(c, auth)
-	if errToken != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": errToken.Error()})
+	auth, errResolve := h.findCodexAuthByIdentifier(authIndex, email, accountID)
+	if errResolve != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errResolve.Error()})
 		return
 	}
-	if accessToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "codex access token not found"})
+	if auth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "codex auth not found for the provided identifier"})
 		return
+	}
+
+	status, parsed, errFetch := h.fetchCodexUsageForAuth(c, auth)
+	if errFetch != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": errFetch.Error()})
+		return
+	}
+
+	auth.EnsureIndex()
+	c.JSON(http.StatusOK, gin.H{
+		"status_code": status,
+		"body":        parsed,
+		"auth_index":  auth.Index,
+		"email":       codexUsageMetaString(auth.Metadata, "email"),
+	})
+}
+
+// getCodexUsageBatch queries usage for every faithful-mode codex credential and
+// returns a per-account result list. One account failing does not abort the rest.
+func (h *Handler) getCodexUsageBatch(c *gin.Context) {
+	results := make([]gin.H, 0)
+	for _, auth := range h.authManager.List() {
+		if auth == nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			continue
+		}
+		if !codexFaithfulEnabled(auth.Metadata) {
+			continue
+		}
+		auth.EnsureIndex()
+		entry := gin.H{
+			"auth_index": auth.Index,
+			"email":      codexUsageMetaString(auth.Metadata, "email"),
+		}
+		status, parsed, errFetch := h.fetchCodexUsageForAuth(c, auth)
+		if errFetch != nil {
+			entry["error"] = errFetch.Error()
+		} else {
+			entry["status_code"] = status
+			entry["body"] = parsed
+		}
+		results = append(results, entry)
+	}
+	c.JSON(http.StatusOK, gin.H{"results": results})
+}
+
+// fetchCodexUsageForAuth resolves the token and performs the read-only usage
+// lookup for a single codex auth, returning the upstream status and parsed body.
+func (h *Handler) fetchCodexUsageForAuth(c *gin.Context, auth *coreauth.Auth) (int, any, error) {
+	accessToken, errToken := h.ensureCodexAccessToken(c, auth)
+	if errToken != nil {
+		return 0, nil, errToken
+	}
+	if accessToken == "" {
+		return 0, nil, fmt.Errorf("codex access token not found")
 	}
 
 	accountID := codexUsageMetaString(auth.Metadata, "account_id")
@@ -63,16 +127,78 @@ func (h *Handler) GetCodexUsage(c *gin.Context) {
 
 	status, body, errFetch := codex.FetchCodexUsage(c.Request.Context(), h.cfg, auth.ProxyURL, accessToken, accountID, isFedramp)
 	if errFetch != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": errFetch.Error()})
-		return
+		return 0, nil, errFetch
 	}
 
 	var parsed any
 	if json.Unmarshal(body, &parsed) == nil {
-		c.JSON(http.StatusOK, gin.H{"status_code": status, "body": parsed})
-		return
+		return status, parsed, nil
 	}
-	c.JSON(http.StatusOK, gin.H{"status_code": status, "body": string(body)})
+	return status, string(body), nil
+}
+
+// findCodexAuthByIdentifier locates a unique codex credential by auth index,
+// email, or account id. It returns an error when the identifier is ambiguous.
+func (h *Handler) findCodexAuthByIdentifier(authIndex, email, accountID string) (*coreauth.Auth, error) {
+	var matches []*coreauth.Auth
+	for _, auth := range h.authManager.List() {
+		if auth == nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			continue
+		}
+		auth.EnsureIndex()
+		if authIndex != "" {
+			if auth.Index == authIndex {
+				return auth, nil
+			}
+			continue
+		}
+		if email != "" && !strings.EqualFold(codexUsageMetaString(auth.Metadata, "email"), email) {
+			continue
+		}
+		if accountID != "" {
+			metaAccount := codexUsageMetaString(auth.Metadata, "account_id")
+			metaChatgpt := codexUsageMetaString(auth.Metadata, "chatgpt_account_id")
+			if !strings.EqualFold(metaAccount, accountID) && !strings.EqualFold(metaChatgpt, accountID) {
+				continue
+			}
+		}
+		matches = append(matches, auth)
+	}
+	if authIndex != "" {
+		return nil, nil
+	}
+	switch len(matches) {
+	case 0:
+		return nil, nil
+	case 1:
+		return matches[0], nil
+	default:
+		return nil, fmt.Errorf("identifier matches %d codex configs; specify auth_index", len(matches))
+	}
+}
+
+// codexFaithfulEnabled reports whether the credential metadata opts into faithful
+// passthrough. Mirrors the executor flag without importing that package.
+func codexFaithfulEnabled(meta map[string]any) bool {
+	if len(meta) == 0 {
+		return false
+	}
+	for _, key := range []string{"codex_faithful", "faithful_passthrough"} {
+		switch v := meta[key].(type) {
+		case bool:
+			if v {
+				return true
+			}
+		case string:
+			if strings.EqualFold(strings.TrimSpace(v), "true") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ensureCodexAccessToken returns a usable access token for the credential,
