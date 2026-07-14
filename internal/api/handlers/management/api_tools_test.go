@@ -2,9 +2,14 @@ package management
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -154,6 +159,106 @@ func TestAPICallTransportAPIKeyAuthFallsBackToConfigProxyURL(t *testing.T) {
 				t.Fatalf("proxy URL = %v, want %s", proxyURL, tc.wantProxy)
 			}
 		})
+	}
+}
+
+func doAPICall(t *testing.T, h *Handler, bodyJSON string) map[string]any {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(bodyJSON))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.APICall(ctx)
+	var out map[string]any
+	if rec.Body.Len() > 0 {
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	}
+	return out
+}
+
+func TestAPICallFaithfulCodexInjectsIdentityHeaders(t *testing.T) {
+	var gotHeaders http.Header
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = w.Write([]byte(`{"code":"reset"}`))
+	}))
+	defer srv.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "faithful-codex",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token":   "at-faithful",
+			"account_id":     "acct-777",
+			"codex_faithful": true,
+		},
+	}
+	auth.EnsureIndex()
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"authIndex":"` + auth.Index + `","method":"POST","url":"` + srv.URL + `/consume",` +
+		`"header":{"Authorization":"Bearer $TOKEN$","Content-Type":"application/json","User-Agent":"codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"},` +
+		`"data":"{\"redeem_request_id\":\"abc\"}"}`
+	doAPICall(t, h, body)
+
+	if got := gotHeaders.Get("Authorization"); got != "Bearer at-faithful" {
+		t.Fatalf("Authorization = %q, want Bearer at-faithful", got)
+	}
+	if got := gotHeaders.Get("Originator"); got != "codex_cli_rs" {
+		t.Fatalf("Originator = %q, want codex_cli_rs", got)
+	}
+	if got := gotHeaders.Get("ChatGPT-Account-Id"); got != "acct-777" {
+		t.Fatalf("ChatGPT-Account-Id = %q, want acct-777", got)
+	}
+	// Stale caller UA must be overwritten with the faithful one.
+	if strings.Contains(gotHeaders.Get("User-Agent"), "0.76.0") {
+		t.Fatalf("User-Agent not overwritten: %q", gotHeaders.Get("User-Agent"))
+	}
+	if !strings.Contains(gotBody, "redeem_request_id") {
+		t.Fatalf("body not forwarded: %q", gotBody)
+	}
+}
+
+func TestAPICallNonFaithfulForwardsHeadersAsIs(t *testing.T) {
+	var gotHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "plain-codex",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token": "at-plain",
+			"account_id":   "acct-000",
+		},
+	}
+	auth.EnsureIndex()
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"authIndex":"` + auth.Index + `","method":"POST","url":"` + srv.URL + `/x",` +
+		`"header":{"Authorization":"Bearer $TOKEN$","User-Agent":"my-ua"}}`
+	doAPICall(t, h, body)
+
+	// Non-faithful: caller UA preserved, no injected Originator.
+	if gotHeaders.Get("User-Agent") != "my-ua" {
+		t.Fatalf("User-Agent = %q, want my-ua (unchanged)", gotHeaders.Get("User-Agent"))
+	}
+	if gotHeaders.Get("Originator") != "" {
+		t.Fatalf("Originator = %q, want empty for non-faithful", gotHeaders.Get("Originator"))
 	}
 }
 

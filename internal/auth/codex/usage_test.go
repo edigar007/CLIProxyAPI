@@ -91,3 +91,39 @@ func TestFetchCodexUsageEmptyToken(t *testing.T) {
 		t.Fatal("expected error for empty token")
 	}
 }
+
+func TestApplyFaithfulCodexIdentityHeaders(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/x", nil)
+	req.Header.Set("Authorization", "Bearer at-keep")
+	req.Header.Set("User-Agent", "stale-ua")
+
+	ApplyFaithfulCodexIdentityHeaders(req, "acct-123", false)
+
+	if got := req.Header.Get("Originator"); got != codexUsageOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexUsageOriginator)
+	}
+	if got := req.Header.Get("User-Agent"); got != codexUsageUserAgent {
+		t.Fatalf("User-Agent = %q, want faithful UA", got)
+	}
+	if got := req.Header.Get("ChatGPT-Account-Id"); got != "acct-123" {
+		t.Fatalf("ChatGPT-Account-Id = %q", got)
+	}
+	if got := req.Header.Get("X-OpenAI-Fedramp"); got != "" {
+		t.Fatalf("X-OpenAI-Fedramp = %q, want empty for non-fedramp", got)
+	}
+	// Authorization must be preserved untouched.
+	if got := req.Header.Get("Authorization"); got != "Bearer at-keep" {
+		t.Fatalf("Authorization changed: %q", got)
+	}
+}
+
+func TestApplyFaithfulCodexIdentityHeadersFedrampAndEmptyAccount(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "https://example.com/x", nil)
+	ApplyFaithfulCodexIdentityHeaders(req, "  ", true)
+	if got := req.Header.Get("X-OpenAI-Fedramp"); got != "true" {
+		t.Fatalf("X-OpenAI-Fedramp = %q, want true", got)
+	}
+	if got := req.Header.Get("ChatGPT-Account-Id"); got != "" {
+		t.Fatalf("ChatGPT-Account-Id = %q, want empty when account id blank", got)
+	}
+}

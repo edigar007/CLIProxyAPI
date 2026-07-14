@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	codex "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -170,6 +171,20 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	if hostOverride != "" {
 		req.Host = hostOverride
+	}
+
+	// For faithful-mode Codex credentials, overwrite the outgoing identity headers
+	// with the codex-CLI-faithful set so the request is indistinguishable from real
+	// Codex CLI traffic (avoids upstream access-enforcement rejections). Authorization
+	// (from $TOKEN$) and the body are left untouched. Non-faithful/other providers are
+	// forwarded exactly as supplied.
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && codexFaithfulEnabled(auth.Metadata) {
+		accountID := codexUsageMetaString(auth.Metadata, "account_id")
+		if accountID == "" {
+			accountID = codexUsageMetaString(auth.Metadata, "chatgpt_account_id")
+		}
+		isFedramp, _ := auth.Metadata["chatgpt_account_is_fedramp"].(bool)
+		codex.ApplyFaithfulCodexIdentityHeaders(req, accountID, isFedramp)
 	}
 
 	httpClient := &http.Client{

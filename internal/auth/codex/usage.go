@@ -35,6 +35,24 @@ const (
 	codexUsageTimeout = 60 * time.Second
 )
 
+// ApplyFaithfulCodexIdentityHeaders sets the codex-CLI-faithful identity headers
+// on an outgoing request so it is indistinguishable from real Codex CLI traffic.
+// It sets Originator, User-Agent, ChatGPT-Account-Id, and (for fedramp accounts)
+// X-OpenAI-Fedramp. It does NOT touch Authorization or the request body.
+func ApplyFaithfulCodexIdentityHeaders(req *http.Request, accountID string, isFedramp bool) {
+	if req == nil {
+		return
+	}
+	req.Header.Set("Originator", codexUsageOriginator)
+	req.Header.Set("User-Agent", codexUsageUserAgent)
+	if accountID = strings.TrimSpace(accountID); accountID != "" {
+		req.Header.Set("ChatGPT-Account-Id", accountID)
+	}
+	if isFedramp {
+		req.Header.Set("X-OpenAI-Fedramp", "true")
+	}
+}
+
 // FetchCodexUsage performs a read-only GET against the Codex usage endpoint using
 // the same minimal header set the Codex CLI sends. It returns the upstream status
 // code and raw response body verbatim so callers can pass the JSON through.
