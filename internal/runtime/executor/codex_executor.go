@@ -38,6 +38,8 @@ const (
 	codexUserAgent             = "codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)"
 	codexOriginator            = "codex-tui"
 	codexDefaultImageToolModel = "gpt-image-2"
+	codexResponsesLiteHeader   = "X-OpenAI-Internal-Codex-Responses-Lite"
+	codexResponsesLiteMetadata = "client_metadata.ws_request_header_x_openai_internal_codex_responses_lite"
 )
 
 var dataTag = []byte("data:")
@@ -540,7 +542,7 @@ func codexReasoningReplayInsertIndex(inputItems []gjson.Result, replayItems [][]
 	}
 	for index := len(inputItems) - 1; index >= 0; index-- {
 		inputItem := inputItems[index]
-		if strings.TrimSpace(inputItem.Get("type").String()) == "message" && strings.TrimSpace(inputItem.Get("role").String()) == "assistant" {
+		if role, ok := codexReplayMessageRole(inputItem); ok && role == "assistant" {
 			return index
 		}
 	}
@@ -609,15 +611,25 @@ func codexReplayOutputCallIDs(inputItems []gjson.Result) map[string]string {
 }
 
 func shouldInsertCodexReasoningReplayBefore(item gjson.Result) bool {
-	if strings.TrimSpace(item.Get("type").String()) != "message" {
+	role, ok := codexReplayMessageRole(item)
+	if !ok {
 		return true
 	}
-	switch strings.TrimSpace(item.Get("role").String()) {
+	switch role {
 	case "developer", "system":
 		return false
 	default:
 		return true
 	}
+}
+
+func codexReplayMessageRole(item gjson.Result) (string, bool) {
+	itemType := strings.TrimSpace(item.Get("type").String())
+	role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+	if role == "" || (itemType != "" && itemType != "message") {
+		return "", false
+	}
+	return role, true
 }
 
 func codexReplayToolCallKeys(item gjson.Result) []string {
@@ -785,7 +797,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	body = normalizeCodexInstructions(body)
 	if !faithful && (e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff) {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCallsForTools(body)
@@ -970,9 +982,6 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = normalizeCodexInstructions(body)
-	if !faithful && (e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff) {
-		body = ensureImageGenerationTool(body, baseModel, auth)
-	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCallsForTools(body)
 	reporter.SetTranslatedReasoningEffort(body, to.String())
@@ -1089,7 +1098,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
 	if !faithful && (e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff) {
-		body = ensureImageGenerationTool(body, baseModel, auth)
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body = normalizeCodexParallelToolCallsForTools(body)
@@ -1783,7 +1792,43 @@ func isCodexFreePlanAuth(auth *cliproxyauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
 }
 
-func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth) []byte {
+func isImageGenerationFunctionTool(tool gjson.Result) bool {
+	switch tool.Get("type").String() {
+	case "function":
+		return tool.Get("name").String() == "image_gen.imagegen"
+	case "namespace":
+		if tool.Get("name").String() != "image_gen" {
+			return false
+		}
+		tools := tool.Get("tools")
+		if !tools.IsArray() {
+			return false
+		}
+		for _, nestedTool := range tools.Array() {
+			if nestedTool.Get("type").String() == "function" && nestedTool.Get("name").String() == "imagegen" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isCodexResponsesLiteRequest(body []byte, headers http.Header) bool {
+	if strings.EqualFold(strings.TrimSpace(headers.Get(codexResponsesLiteHeader)), "true") {
+		return true
+	}
+	// Codex Desktop mirrors websocket-only request headers into client_metadata.
+	value := gjson.GetBytes(body, codexResponsesLiteMetadata)
+	if !value.Exists() {
+		return false
+	}
+	return value.Type == gjson.True || value.Type == gjson.String && strings.EqualFold(strings.TrimSpace(value.String()), "true")
+}
+
+func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
+	if isCodexResponsesLiteRequest(body, headers) {
+		return body
+	}
 	if strings.HasSuffix(baseModel, "spark") {
 		return body
 	}
@@ -1797,7 +1842,7 @@ func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth
 		return body
 	}
 	for _, t := range tools.Array() {
-		if t.Get("type").String() == "image_generation" {
+		if t.Get("type").String() == "image_generation" || isImageGenerationFunctionTool(t) {
 			return body
 		}
 	}
