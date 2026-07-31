@@ -56,7 +56,7 @@ func TestCodexExecutorFaithfulPassthroughForwardsClientRequest(t *testing.T) {
 
 	// A codex-shaped request as the CLI would send it, including fields CPA would
 	// normally strip and NO image_generation tool.
-	payload := []byte(`{"model":"gpt-5.5","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true,"store":false,"previous_response_id":"resp_prev","prompt_cache_key":"client-key","tools":[]}`)
+	payload := []byte(`{"model":"gpt-5.5","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true,"store":false,"previous_response_id":"resp_prev","prompt_cache_key":"client-key","reasoning":{"summary":"detailed"},"tools":[]}`)
 
 	_, err := executor.Execute(codexFaithfulTestContext(t), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
@@ -82,6 +82,9 @@ func TestCodexExecutorFaithfulPassthroughForwardsClientRequest(t *testing.T) {
 	}
 	if gjson.GetBytes(gotBody, "prompt_cache_key").String() != "client-key" {
 		t.Fatalf("prompt_cache_key should be preserved untouched; body=%s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "reasoning.summary").String() != "detailed" {
+		t.Fatalf("reasoning.summary should be preserved untouched; body=%s", string(gotBody))
 	}
 
 	// Token swapped in; client identity headers preserved (not confused/overwritten).
