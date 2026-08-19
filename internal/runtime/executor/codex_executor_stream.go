@@ -44,7 +44,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
+	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true, helps.APIKeyModelIsCompat(req))
 
 	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -61,6 +61,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 		body, _ = sjson.DeleteBytes(body, "safety_identifier")
 		body, _ = sjson.DeleteBytes(body, "stream_options")
+		reasoningSummaryDelivery := gjson.GetBytes(body, "stream_options.reasoning_summary_delivery")
+		body, _ = sjson.DeleteBytes(body, "stream_options")
+		if reasoningSummaryDelivery.Exists() {
+			body, _ = sjson.SetBytes(body, "stream_options.reasoning_summary_delivery", reasoningSummaryDelivery.Value())
+		}
 	}
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
@@ -71,10 +76,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	optimizeMultiAgentV2 := false
 	if !faithful {
-		body, optimizeMultiAgentV2 = helps.OptimizeCodexMultiAgentV2Request(ctx, opts.Headers, body, e.cfg)
+		body, optimizeMultiAgentV2 = helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
 	}
 	var replayScope codexReasoningReplayScope
 	if !faithful {
+		var errReplay error
+		body, replayScope, errReplay = applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+		if errReplay != nil {
+			return nil, errReplay
+		}
 		var errReplay error
 		body, replayScope, errReplay = applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
 		if errReplay != nil {
@@ -92,7 +102,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if faithful {
 		applyCodexFaithfulHeaders(httpReq, auth, apiKey)
 	} else {
-		applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+		applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
 		applyModelHeaderOverrides(httpReq.Header, baseModel)
 		applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	}
