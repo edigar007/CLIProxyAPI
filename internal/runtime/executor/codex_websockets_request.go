@@ -131,6 +131,51 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	return headers
 }
 
+// applyCodexFaithfulWebsocketHeaders forwards client identity and protocol
+// headers without applying Codex cloaking or synthesizing session metadata.
+func applyCodexFaithfulWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, clientHeaders ...http.Header) http.Header {
+	if headers == nil {
+		headers = http.Header{}
+	}
+	var source http.Header
+	if len(clientHeaders) > 0 && clientHeaders[0] != nil {
+		source = clientHeaders[0]
+	} else if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		source = ginCtx.Request.Header
+	}
+	for key, values := range source {
+		switch http.CanonicalHeaderKey(key) {
+		case "Authorization", "Host", "Content-Length", "Content-Encoding", "Accept-Encoding", "Connection", "Upgrade", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions":
+			continue
+		}
+		deleteHeaderCaseInsensitive(headers, key)
+		for _, value := range values {
+			headers.Add(key, value)
+		}
+	}
+	if strings.TrimSpace(token) != "" {
+		headers.Set("Authorization", "Bearer "+token)
+	}
+	if strings.TrimSpace(headers.Get("OpenAI-Beta")) == "" {
+		headers.Set("OpenAI-Beta", codexResponsesWebsocketBetaHeaderValue)
+	}
+	if auth != nil && auth.Metadata != nil {
+		accountID, _ := auth.Metadata["account_id"].(string)
+		if strings.TrimSpace(accountID) == "" {
+			accountID, _ = auth.Metadata["chatgpt_account_id"].(string)
+		}
+		if accountID = strings.TrimSpace(accountID); accountID != "" {
+			setHeaderCasePreserved(headers, "ChatGPT-Account-ID", accountID)
+		}
+	}
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs, source)
+	return headers
+}
+
 func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, fallbackValue string) {
 	if target == nil {
 		return

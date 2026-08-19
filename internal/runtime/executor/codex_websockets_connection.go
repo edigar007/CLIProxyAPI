@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -104,9 +105,12 @@ func normalizeCodexWebsocketParallelToolCalls(body []byte, headers http.Header) 
 	return body
 }
 
-func buildCodexWebsocketRequestBody(body []byte) []byte {
+func buildCodexWebsocketRequestBody(body []byte, faithful ...bool) []byte {
 	if len(body) == 0 {
 		return nil
+	}
+	if len(faithful) > 0 && faithful[0] {
+		return bytes.Clone(body)
 	}
 
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.

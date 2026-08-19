@@ -296,16 +296,18 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 
 // applyCodexFaithfulHeaders preserves the client's identity headers and swaps
 // only credential-scoped values required for the selected Codex account.
-func applyCodexFaithfulHeaders(r *http.Request, auth *cliproxyauth.Auth, token string) {
+func applyCodexFaithfulHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, clientHeaders ...http.Header) {
 	var ginHeaders http.Header
-	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+	if len(clientHeaders) > 0 && clientHeaders[0] != nil {
+		ginHeaders = clientHeaders[0]
+	} else if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
 
 	if ginHeaders != nil {
 		for key, values := range ginHeaders {
 			switch http.CanonicalHeaderKey(key) {
-			case "Authorization", "Host", "Content-Length", "Accept-Encoding":
+			case "Authorization", "Host", "Content-Length", "Content-Encoding", "Accept-Encoding":
 				continue
 			}
 			r.Header.Del(key)
@@ -314,6 +316,10 @@ func applyCodexFaithfulHeaders(r *http.Request, auth *cliproxyauth.Auth, token s
 			}
 		}
 	}
+	// ReadRequestBody decodes supported request encodings before this executor
+	// runs. Never advertise an encoding that is no longer present on the body.
+	r.Header.Del("Content-Encoding")
+	r.Header.Del("Content-Length")
 
 	if strings.TrimSpace(r.Header.Get("Content-Type")) == "" {
 		r.Header.Set("Content-Type", "application/json")

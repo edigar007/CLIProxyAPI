@@ -16,6 +16,7 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -39,33 +40,49 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("codex")
+	faithful := codexFaithfulPassthrough(auth)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true)
-
-	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return nil, err
+	var originalTranslated, body []byte
+	if faithful {
+		body = bytes.Clone(originalPayloadSource)
+		originalTranslated = bytes.Clone(body)
+	} else {
+		originalTranslated, body = translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true, helps.APIKeyModelIsCompat(req))
+		body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
+		if err != nil {
+			return nil, err
+		}
+		requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+		requestPath := helps.PayloadRequestPath(opts)
+		body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+		body = helps.SetStringIfDifferent(body, "model", baseModel)
+		reasoningSummaryDelivery := gjson.GetBytes(body, "stream_options.reasoning_summary_delivery")
+		body, _ = sjson.DeleteBytes(body, "stream_options")
+		if reasoningSummaryDelivery.Exists() {
+			body, _ = sjson.SetBytes(body, "stream_options.reasoning_summary_delivery", reasoningSummaryDelivery.Value())
+		}
+		body = normalizeCodexInstructions(body)
+		if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+			body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
+		}
+		body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
+		body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
 	}
-
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	body = helps.SetStringIfDifferent(body, "model", baseModel)
-	body = normalizeCodexInstructions(body)
-	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
-	}
-	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
-	body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
-	multiAgentV2Conflict := helps.HasCodexMultiAgentV2NamespaceConflict(body)
-	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
-	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
-	if errReplay != nil {
-		return nil, errReplay
+	multiAgentV2Conflict := false
+	optimizeMultiAgentV2 := false
+	var replayScope codexReasoningReplayScope
+	if !faithful {
+		multiAgentV2Conflict = helps.HasCodexMultiAgentV2NamespaceConflict(body)
+		body, optimizeMultiAgentV2 = helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
+		var errReplay error
+		body, replayScope, errReplay = applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
+		if errReplay != nil {
+			return nil, errReplay
+		}
 	}
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -74,17 +91,29 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		return nil, err
 	}
 
-	body, wsHeaders, errPromptCache := applyCodexPromptCacheHeadersWithContext(ctx, from, req, body, opts.Headers)
-	if errPromptCache != nil {
-		return nil, errPromptCache
+	var wsHeaders http.Header
+	if faithful {
+		wsHeaders = http.Header{}
+	} else {
+		body, wsHeaders, err = applyCodexPromptCacheHeadersWithContext(ctx, from, req, body, opts.Headers)
+		if err != nil {
+			return nil, err
+		}
 	}
 	clientBody := body
 	var identityState codexIdentityConfuseState
-	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
+	upstreamBody := body
+	if !faithful {
+		upstreamBody, identityState = applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
+	}
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, opts.Headers)
-	applyModelHeaderOverrides(wsHeaders, baseModel)
-	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
+	if faithful {
+		wsHeaders = applyCodexFaithfulWebsocketHeaders(ctx, wsHeaders, auth, apiKey, opts.Headers)
+	} else {
+		wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, opts.Headers)
+		applyModelHeaderOverrides(wsHeaders, baseModel)
+		applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
+	}
 
 	var authID, authLabel, authType, authValue string
 	authID = auth.ID
@@ -107,7 +136,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		}
 	}
 
-	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
+	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody, faithful)
 	wsReqLog := helps.UpstreamRequestLog{
 		URL:       wsURL,
 		Method:    "WEBSOCKET",
@@ -226,7 +255,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			readCh = sess.activate(conn)
 			restoreMultiAgentV2 = !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
-			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
+			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody, faithful)
 			helps.RecordAPIWebsocketRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 				URL:       wsURL,
 				Method:    "WEBSOCKET",

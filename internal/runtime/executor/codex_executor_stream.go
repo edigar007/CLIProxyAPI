@@ -39,52 +39,48 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("codex")
+	faithful := codexFaithfulPassthrough(auth)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated, body := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true, helps.APIKeyModelIsCompat(req))
-
-	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
-	if err != nil {
-		return nil, err
-	}
-
-	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
-	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
-	faithful := codexFaithfulPassthrough(auth)
-	if !faithful {
+	var originalTranslated, body []byte
+	if faithful {
+		body = bytes.Clone(originalPayloadSource)
+		originalTranslated = bytes.Clone(body)
+	} else {
+		originalTranslated, body = translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, true, helps.APIKeyModelIsCompat(req))
+		body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
+		if err != nil {
+			return nil, err
+		}
+		requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+		requestPath := helps.PayloadRequestPath(opts)
+		body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 		body, _ = sjson.DeleteBytes(body, "previous_response_id")
 		body, _ = sjson.DeleteBytes(body, "generate")
 		body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 		body, _ = sjson.DeleteBytes(body, "safety_identifier")
-		body, _ = sjson.DeleteBytes(body, "stream_options")
 		reasoningSummaryDelivery := gjson.GetBytes(body, "stream_options.reasoning_summary_delivery")
 		body, _ = sjson.DeleteBytes(body, "stream_options")
 		if reasoningSummaryDelivery.Exists() {
 			body, _ = sjson.SetBytes(body, "stream_options.reasoning_summary_delivery", reasoningSummaryDelivery.Value())
 		}
+		body = helps.SetStringIfDifferent(body, "model", baseModel)
+		body = normalizeCodexInstructions(body)
+		if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+			body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
+		}
+		body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
+		body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	}
-	body = helps.SetStringIfDifferent(body, "model", baseModel)
-	body = normalizeCodexInstructions(body)
-	if !faithful && (e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff) {
-		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
-	}
-	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
-	body = normalizeCodexParallelToolCalls(body, opts.Headers)
 	optimizeMultiAgentV2 := false
 	if !faithful {
 		body, optimizeMultiAgentV2 = helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
 	}
 	var replayScope codexReasoningReplayScope
 	if !faithful {
-		var errReplay error
-		body, replayScope, errReplay = applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
-		if errReplay != nil {
-			return nil, errReplay
-		}
 		var errReplay error
 		body, replayScope, errReplay = applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
 		if errReplay != nil {
@@ -100,7 +96,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	if faithful {
-		applyCodexFaithfulHeaders(httpReq, auth, apiKey)
+		applyCodexFaithfulHeaders(httpReq, auth, apiKey, opts.Headers)
 	} else {
 		applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
 		applyModelHeaderOverrides(httpReq.Header, baseModel)
