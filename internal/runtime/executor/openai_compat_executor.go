@@ -1024,3 +1024,11 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+// IsRequestScoped reports whether the error is tied to the current request rather
+// than the credential. Upstream capacity signals ({"code":"server_is_overloaded"})
+// mean the account is healthy and OpenAI is temporarily overloaded, so they must
+// not cool the credential down or rotate it.
+func (e statusErr) IsRequestScoped() bool {
+	return isCodexServerOverloadedError([]byte(e.msg))
+}

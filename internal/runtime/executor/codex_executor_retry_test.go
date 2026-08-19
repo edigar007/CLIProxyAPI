@@ -196,6 +196,69 @@ func TestNewCodexStatusErrPreservesUnclassifiedErrors(t *testing.T) {
 	}
 }
 
+func TestNewCodexStatusErrTreatsServerOverloadedAsRequestScoped(t *testing.T) {
+	body := []byte(`{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`)
+
+	err := newCodexStatusErr(http.StatusBadGateway, body)
+
+	if got := err.StatusCode(); got != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+	if got := err.Error(); got != string(body) {
+		t.Fatalf("error body = %s, want original %s", got, string(body))
+	}
+	if !err.IsRequestScoped() {
+		t.Fatal("server_is_overloaded error must be request-scoped so credential cooldown is skipped")
+	}
+}
+
+func TestIsCodexServerOverloadedError(t *testing.T) {
+	tests := []struct {
+		name string
+		body []byte
+		want bool
+	}{
+		{
+			name: "wrapped error.code",
+			body: []byte(`{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded."}}`),
+			want: true,
+		},
+		{
+			name: "top-level code",
+			body: []byte(`{"type":"error","code":"server_is_overloaded","message":"Our servers are currently overloaded."}`),
+			want: true,
+		},
+		{
+			name: "case insensitive",
+			body: []byte(`{"error":{"code":"Server_Is_Overloaded"}}`),
+			want: true,
+		},
+		{
+			name: "other capacity code",
+			body: []byte(`{"error":{"code":"model_at_capacity"}}`),
+			want: false,
+		},
+		{
+			name: "plain text body",
+			body: []byte("upstream went away"),
+			want: false,
+		},
+		{
+			name: "empty body",
+			body: nil,
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCodexServerOverloadedError(tc.body); got != tc.want {
+				t.Fatalf("isCodexServerOverloadedError = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func assertCodexErrorCode(t *testing.T, raw string, wantType string, wantCode string) {
 	t.Helper()
 

@@ -576,6 +576,16 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			event:      `{"type":"response.failed","response":{"error":{"type":"upstream_error","code":"unknown","message":"Upstream failed."}}}`,
 			wantStatus: http.StatusBadGateway,
 		},
+		{
+			name:       "server overloaded",
+			event:      `{"type":"error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}`,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "server overloaded wrapped",
+			event:      `{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+			wantStatus: http.StatusServiceUnavailable,
+		},
 	}
 
 	for _, tc := range tests {
@@ -588,6 +598,19 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 				t.Fatalf("status code = %d, want %d; err=%v", got, tc.wantStatus, streamErr)
 			}
 		})
+	}
+}
+
+func TestCodexTerminalFailureErrServerOverloadedIsRequestScoped(t *testing.T) {
+	streamErr, _, ok := codexTerminalFailureErr([]byte(`{"type":"error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}`))
+	if !ok {
+		t.Fatal("expected server_is_overloaded terminal failure to be handled")
+	}
+	if got := streamErr.StatusCode(); got != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+	if !streamErr.IsRequestScoped() {
+		t.Fatal("server_is_overloaded terminal error must be request-scoped so credential cooldown is skipped")
 	}
 }
 

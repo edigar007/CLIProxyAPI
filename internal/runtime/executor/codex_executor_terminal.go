@@ -29,6 +29,25 @@ func (codexIncompleteStreamError) IsRequestScoped() bool {
 	return true
 }
 
+// isCodexServerOverloadedError reports whether the body carries the upstream
+// capacity signal OpenAI emits when its servers are overloaded. The account is
+// healthy in this case, so the failure must not cool the credential down.
+func isCodexServerOverloadedError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	candidates := []string{
+		gjson.GetBytes(errorBody, "error.code").String(),
+		gjson.GetBytes(errorBody, "code").String(),
+	}
+	for _, candidate := range candidates {
+		if strings.EqualFold(strings.TrimSpace(candidate), "server_is_overloaded") {
+			return true
+		}
+	}
+	return false
+}
+
 // Streamed Codex responses may emit response.output_item.done events while leaving
 // response.completed.response.output empty. Keep the stream path aligned with the
 // already-patched non-stream path by reconstructing response.output from those items.
@@ -283,6 +302,11 @@ func codexTerminalErrorIsContextLength(body []byte) bool {
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
+	if isCodexServerOverloadedError(body) {
+		// Surface upstream capacity as a transient 503 that stays request-scoped
+		// (see statusErr.IsRequestScoped) so credential availability is untouched.
+		return statusErr{code: http.StatusServiceUnavailable, msg: string(body)}
+	}
 	errCode := statusCode
 	if isCodexModelCapacityError(body) || isCodexUsageLimitError(body) {
 		errCode = http.StatusTooManyRequests
