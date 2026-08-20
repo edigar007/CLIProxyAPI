@@ -26,6 +26,7 @@ const (
 	codexUserAgent             = "codex-tui/0.146.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.146.0)"
 	codexOriginator            = "codex-tui"
 	codexDefaultImageToolModel = "gpt-image-2"
+	codexRoutingHintHeader     = "X-Codex-Routing-Hint"
 	codexResponsesLiteHeader   = "X-OpenAI-Internal-Codex-Responses-Lite"
 	codexResponsesLiteMetadata = "client_metadata.ws_request_header_x_openai_internal_codex_responses_lite"
 )
@@ -342,6 +343,24 @@ func applyCodexFaithfulHeaders(r *http.Request, auth *cliproxyauth.Auth, token s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+// applyCodexFaithfulRoutingHint matches the routing hint emitted by current
+// Codex clients for ChatGPT access-token requests. A client-provided or custom
+// header remains authoritative.
+func applyCodexFaithfulRoutingHint(headers http.Header, auth *cliproxyauth.Auth, body []byte) {
+	if headers == nil || codexAuthUsesAPIKey(auth) || strings.TrimSpace(headerValueCaseInsensitive(headers, codexRoutingHintHeader)) != "" {
+		return
+	}
+	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if model == "" || strings.ContainsAny(model, "\r\n") {
+		return
+	}
+	hint := "model=" + model
+	if serviceTier := strings.TrimSpace(gjson.GetBytes(body, "service_tier").String()); serviceTier != "" && !strings.ContainsAny(serviceTier, "\r\n") {
+		hint += ";tier=" + serviceTier
+	}
+	headers.Set(codexRoutingHintHeader, hint)
 }
 
 // applyModelHeaderOverrides forces models.json config.override_header onto upstream headers.

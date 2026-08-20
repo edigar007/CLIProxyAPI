@@ -91,6 +91,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	if faithful {
 		applyCodexFaithfulHeaders(httpReq, auth, apiKey, opts.Headers)
+		applyCodexFaithfulRoutingHint(httpReq.Header, auth, upstreamBody)
 	} else {
 		applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
 		applyModelHeaderOverrides(httpReq.Header, baseModel)
@@ -263,6 +264,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	}
 	if faithful {
 		applyCodexFaithfulHeaders(httpReq, auth, apiKey, opts.Headers)
+		applyCodexFaithfulRoutingHint(httpReq.Header, auth, upstreamBody)
 	} else {
 		applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg, opts.Headers)
 		applyModelHeaderOverrides(httpReq.Header, baseModel)

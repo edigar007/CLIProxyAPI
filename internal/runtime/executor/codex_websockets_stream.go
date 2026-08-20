@@ -109,6 +109,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
 	if faithful {
 		wsHeaders = applyCodexFaithfulWebsocketHeaders(ctx, wsHeaders, auth, apiKey, opts.Headers)
+		applyCodexFaithfulRoutingHint(wsHeaders, auth, upstreamBody)
 	} else {
 		wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, opts.Headers)
 		applyModelHeaderOverrides(wsHeaders, baseModel)

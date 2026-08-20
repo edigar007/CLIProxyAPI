@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -21,10 +22,13 @@ import (
 func codexFaithfulTestContext(t *testing.T) context.Context {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/backend-api/codex/responses", nil)
-	req.Header.Set("User-Agent", "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.148.0 (Windows 10; x86_64)")
 	req.Header.Set("Originator", "codex_cli_rs")
-	req.Header.Set("Session_id", "client-session-123")
+	req.Header.Set("Session-Id", "client-session-123")
+	req.Header.Set("Thread-Id", "client-thread-123")
 	req.Header.Set("X-Client-Request-Id", "client-req-123")
+	req.Header.Set("X-Codex-Window-Id", "client-window-123")
+	req.Header.Set("X-Codex-Turn-Metadata", `{"session_id":"client-session-123","thread_id":"client-thread-123","turn_id":"turn-123","request_kind":"turn"}`)
 	ginCtx := &gin.Context{Request: req}
 	return context.WithValue(context.Background(), "gin", ginCtx)
 }
@@ -55,18 +59,21 @@ func TestCodexExecutorFaithfulPassthroughForwardsClientRequest(t *testing.T) {
 		},
 	}
 
-	// A codex-shaped request as the CLI would send it, including fields CPA would
-	// normally strip and NO image_generation tool.
-	payload := []byte(`{"model":"gpt-5.5","instructions":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true,"store":false,"previous_response_id":"resp_prev","prompt_cache_key":"client-key","reasoning":{"summary":"detailed"},"tools":[]}`)
+	// This mirrors the ResponsesApiRequest serialized by codex-cli 0.148.0.
+	// It intentionally has no image_generation tool.
+	payload := []byte(`{"model":"gpt-5.6-sol","instructions":"follow the user request","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"reasoning":{"effort":"high","summary":"detailed"},"store":false,"stream":true,"stream_options":{"reasoning_summary_delivery":"sequential_cutoff"},"include":["reasoning.encrypted_content"],"service_tier":"priority","prompt_cache_key":"client-key","text":{"verbosity":"medium"},"client_metadata":{"x-codex-installation-id":"install-123","session_id":"client-session-123","thread_id":"client-thread-123","turn_id":"turn-123","x-codex-window-id":"client-window-123","x-codex-turn-metadata":"{\"session_id\":\"client-session-123\",\"thread_id\":\"client-thread-123\",\"turn_id\":\"turn-123\",\"request_kind\":\"turn\"}"}}`)
 
 	_, err := executor.Execute(codexFaithfulTestContext(t), auth, cliproxyexecutor.Request{
-		Model:   "gpt-5.5",
+		Model:   "gpt-5.6-sol",
 		Payload: payload,
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("codex"),
 	})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
+	}
+	if !bytes.Equal(gotBody, payload) {
+		t.Fatalf("faithful body changed\n got: %s\nwant: %s", string(gotBody), string(payload))
 	}
 
 	// No image_generation tool must be injected.
@@ -77,10 +84,7 @@ func TestCodexExecutorFaithfulPassthroughForwardsClientRequest(t *testing.T) {
 		}
 	}
 
-	// Client-set fields must be preserved (not stripped).
-	if gjson.GetBytes(gotBody, "previous_response_id").String() != "resp_prev" {
-		t.Fatalf("previous_response_id should be preserved; body=%s", string(gotBody))
-	}
+	// Current Codex fields must be preserved, including canonical client metadata.
 	if gjson.GetBytes(gotBody, "prompt_cache_key").String() != "client-key" {
 		t.Fatalf("prompt_cache_key should be preserved untouched; body=%s", string(gotBody))
 	}
@@ -95,17 +99,20 @@ func TestCodexExecutorFaithfulPassthroughForwardsClientRequest(t *testing.T) {
 	if got := gotHeaders.Get("Chatgpt-Account-Id"); got != "acct-999" {
 		t.Fatalf("Chatgpt-Account-Id = %q", got)
 	}
-	if got := gotHeaders.Get("User-Agent"); got != "codex_cli_rs/0.133.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9" {
+	if got := gotHeaders.Get("User-Agent"); got != "codex_cli_rs/0.148.0 (Windows 10; x86_64)" {
 		t.Fatalf("User-Agent not preserved: %q", got)
 	}
 	if got := gotHeaders.Get("Originator"); got != "codex_cli_rs" {
 		t.Fatalf("Originator not preserved: %q", got)
 	}
-	if got := gotHeaders.Get("Session_id"); got != "client-session-123" {
-		t.Fatalf("Session_id should be the client value, got %q", got)
+	if got := gotHeaders.Get("Session-Id"); got != "client-session-123" {
+		t.Fatalf("Session-Id should be the client value, got %q", got)
 	}
 	if got := gotHeaders.Get("X-Client-Request-Id"); got != "client-req-123" {
 		t.Fatalf("X-Client-Request-Id should be the client value, got %q", got)
+	}
+	if got := gotHeaders.Get(codexRoutingHintHeader); got != "model=gpt-5.6-sol;tier=priority" {
+		t.Fatalf("%s = %q", codexRoutingHintHeader, got)
 	}
 }
 
@@ -201,5 +208,28 @@ func TestCodexFaithfulWebsocketHeadersPreserveCanonicalClientIdentity(t *testing
 	}
 	if got := headers.Get("X-Codex-Turn-Metadata"); got == "" {
 		t.Fatal("X-Codex-Turn-Metadata should be preserved")
+	}
+}
+
+func TestApplyCodexFaithfulRoutingHintPreservesClientValueAndSkipsAPIKeys(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6-sol","service_tier":"priority"}`)
+	headers := http.Header{codexRoutingHintHeader: []string{"client-value"}}
+	applyCodexFaithfulRoutingHint(headers, &cliproxyauth.Auth{}, body)
+	if got := headers.Get(codexRoutingHintHeader); got != "client-value" {
+		t.Fatalf("client routing hint changed to %q", got)
+	}
+
+	apiKeyHeaders := http.Header{}
+	applyCodexFaithfulRoutingHint(apiKeyHeaders, &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test"}}, body)
+	if got := apiKeyHeaders.Get(codexRoutingHintHeader); got != "" {
+		t.Fatalf("API-key request routing hint = %q, want empty", got)
+	}
+}
+
+func TestBuildCodexWebsocketRequestBodyFaithfulPreservesCurrentEnvelope(t *testing.T) {
+	payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"resp-prev","input":[{"type":"function_call_output","call_id":"call-1","output":"ok"}],"stream":true,"client_metadata":{"session_id":"session-1","thread_id":"thread-1","x-codex-ws-stream-request-start-ms":"1787200000000"}}`)
+	got := buildCodexWebsocketRequestBody(payload, true)
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("faithful websocket body changed\n got: %s\nwant: %s", string(got), string(payload))
 	}
 }
