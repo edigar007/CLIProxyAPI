@@ -18,6 +18,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/net/proxy"
 )
@@ -110,7 +111,15 @@ func buildCodexWebsocketRequestBody(body []byte, faithful ...bool) []byte {
 		return nil
 	}
 	if len(faithful) > 0 && faithful[0] {
-		return bytes.Clone(body)
+		body = bytes.Clone(body)
+		if strings.TrimSpace(gjson.GetBytes(body, "type").String()) != "" {
+			return body
+		}
+		wsReqBody, errSet := sjson.SetBytes(body, "type", "response.create")
+		if errSet == nil && len(wsReqBody) > 0 {
+			return wsReqBody
+		}
+		return body
 	}
 
 	// Match codex-rs websocket v2 semantics: every request is `response.create`.

@@ -144,8 +144,11 @@ func applyCodexFaithfulWebsocketHeaders(ctx context.Context, headers http.Header
 		source = ginCtx.Request.Header
 	}
 	for key, values := range source {
-		switch http.CanonicalHeaderKey(key) {
-		case "Authorization", "Host", "Content-Length", "Content-Encoding", "Accept-Encoding", "Connection", "Upgrade", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions":
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "authorization", "host", "content-length", "content-encoding", "accept-encoding":
+			continue
+		}
+		if isCodexWebsocketHandshakeHeader(key) {
 			continue
 		}
 		deleteHeaderCaseInsensitive(headers, key)
@@ -173,7 +176,21 @@ func applyCodexFaithfulWebsocketHeaders(ctx context.Context, headers http.Header
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs, source)
+	dropCodexWebsocketHandshakeHeaders(headers)
 	return headers
+}
+
+func isCodexWebsocketHandshakeHeader(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	return key == "connection" || key == "upgrade" || strings.HasPrefix(key, "sec-websocket-")
+}
+
+func dropCodexWebsocketHandshakeHeaders(headers http.Header) {
+	for key := range headers {
+		if isCodexWebsocketHandshakeHeader(key) {
+			delete(headers, key)
+		}
+	}
 }
 
 func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, fallbackValue string) {

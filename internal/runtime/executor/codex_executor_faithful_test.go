@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -186,6 +187,75 @@ func TestCodexFaithfulHeadersDropDecodedContentEncoding(t *testing.T) {
 	}
 }
 
+func TestCodexAutoExecutorFaithfulHTTPFallbackDropsWebsocketHandshakeHeaders(t *testing.T) {
+	var gotRequest bool
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		gotRequest = true
+		if got := req.Header.Values("Upgrade"); len(got) > 0 {
+			return nil, fmt.Errorf("http2: invalid Upgrade request header: %q", got)
+		}
+		for _, key := range []string{
+			"Connection",
+			"Sec-WebSocket-Key",
+			"Sec-WebSocket-Version",
+			"Sec-WebSocket-Protocol",
+			"Sec-WebSocket-Extensions",
+		} {
+			if got := req.Header.Get(key); got != "" {
+				t.Fatalf("%s = %q, want empty on HTTP fallback", key, got)
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(
+				"data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}\n\n",
+			)),
+			Request: req,
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	ctx = cliproxyexecutor.WithDownstreamWebsocket(ctx)
+
+	executor := NewCodexAutoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "faithful-http-fallback",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token":   "at-faithful-token",
+			"account_id":     "acct-999",
+			"codex_faithful": true,
+		},
+	}
+	headers := http.Header{}
+	headers.Set("Connection", "Upgrade")
+	headers.Set("Upgrade", "websocket")
+	headers.Set("Sec-WebSocket-Key", "downstream-key")
+	headers.Set("Sec-WebSocket-Version", "13")
+	headers.Set("Sec-WebSocket-Protocol", "responses")
+	headers.Set("Sec-WebSocket-Extensions", "permessage-deflate")
+
+	result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6-sol",
+		Payload: []byte(`{"model":"gpt-5.6-sol","input":"hello","stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+		Headers:      headers,
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream HTTP fallback error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream error: %v", chunk.Err)
+		}
+	}
+	if !gotRequest {
+		t.Fatal("HTTP fallback request was not sent")
+	}
+}
+
 func TestCodexFaithfulWebsocketHeadersPreserveCanonicalClientIdentity(t *testing.T) {
 	ctx := codexFaithfulTestContext(t)
 	ginCtx := ctx.Value("gin").(*gin.Context)
@@ -211,6 +281,31 @@ func TestCodexFaithfulWebsocketHeadersPreserveCanonicalClientIdentity(t *testing
 	}
 }
 
+func TestCodexFaithfulWebsocketHeadersDropDownstreamHandshakeHeaders(t *testing.T) {
+	ctx := codexFaithfulTestContext(t)
+	ginCtx := ctx.Value("gin").(*gin.Context)
+	ginCtx.Request.Header.Set("Connection", "Upgrade")
+	ginCtx.Request.Header.Set("Upgrade", "websocket")
+	ginCtx.Request.Header.Set("Sec-WebSocket-Key", "downstream-key")
+	ginCtx.Request.Header.Set("Sec-WebSocket-Version", "13")
+	ginCtx.Request.Header.Set("Sec-WebSocket-Protocol", "responses")
+	ginCtx.Request.Header.Set("Sec-WebSocket-Extensions", "permessage-deflate")
+
+	headers := applyCodexFaithfulWebsocketHeaders(ctx, http.Header{}, &cliproxyauth.Auth{}, "token")
+	for _, key := range []string{
+		"Connection",
+		"Upgrade",
+		"Sec-WebSocket-Key",
+		"Sec-WebSocket-Version",
+		"Sec-WebSocket-Protocol",
+		"Sec-WebSocket-Extensions",
+	} {
+		if got := headers.Get(key); got != "" {
+			t.Fatalf("%s = %q, want empty before upstream websocket dial", key, got)
+		}
+	}
+}
+
 func TestApplyCodexFaithfulRoutingHintPreservesClientValueAndSkipsAPIKeys(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.6-sol","service_tier":"priority"}`)
 	headers := http.Header{codexRoutingHintHeader: []string{"client-value"}}
@@ -231,5 +326,13 @@ func TestBuildCodexWebsocketRequestBodyFaithfulPreservesCurrentEnvelope(t *testi
 	got := buildCodexWebsocketRequestBody(payload, true)
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("faithful websocket body changed\n got: %s\nwant: %s", string(got), string(payload))
+	}
+}
+
+func TestBuildCodexWebsocketRequestBodyFaithfulAddsMissingCreateType(t *testing.T) {
+	payload := []byte(`{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":"hello"}],"stream":true}`)
+	got := buildCodexWebsocketRequestBody(payload, true)
+	if gotType := gjson.GetBytes(got, "type").String(); gotType != "response.create" {
+		t.Fatalf("faithful websocket type = %q, want response.create; body=%s", gotType, string(got))
 	}
 }

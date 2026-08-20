@@ -307,8 +307,11 @@ func applyCodexFaithfulHeaders(r *http.Request, auth *cliproxyauth.Auth, token s
 
 	if ginHeaders != nil {
 		for key, values := range ginHeaders {
-			switch http.CanonicalHeaderKey(key) {
-			case "Authorization", "Host", "Content-Length", "Content-Encoding", "Accept-Encoding":
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "authorization", "host", "content-length", "content-encoding", "accept-encoding":
+				continue
+			}
+			if isCodexWebsocketHandshakeHeader(key) {
 				continue
 			}
 			r.Header.Del(key)
@@ -343,6 +346,7 @@ func applyCodexFaithfulHeaders(r *http.Request, auth *cliproxyauth.Auth, token s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	dropCodexWebsocketHandshakeHeaders(r.Header)
 }
 
 // applyCodexFaithfulRoutingHint matches the routing hint emitted by current
