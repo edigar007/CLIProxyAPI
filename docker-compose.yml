@@ -9,6 +9,8 @@ services:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        APT_MIRROR: ${APT_MIRROR:-mirrors.aliyun.com}
     container_name: cli-proxy-api
     # env_file:
     #   - .env
