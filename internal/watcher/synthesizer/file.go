@@ -224,13 +224,22 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	applyFingerprintProfileAttribute(a, metadata)
-	// For codex auth files, extract plan_type from the JWT id_token.
+	// For Codex auth files, fall back to explicit plan metadata when there is no ID token.
 	if provider == "codex" {
 		if idTokenRaw, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idTokenRaw) != "" {
 			if claims, errParse := codex.ParseJWTToken(idTokenRaw); errParse == nil && claims != nil {
 				if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
 					a.Attributes["plan_type"] = pt
 				}
+			}
+		}
+		if a.Attributes["plan_type"] == "" {
+			planType, _ := metadata["plan_type"].(string)
+			if strings.TrimSpace(planType) == "" {
+				planType, _ = metadata["chatgpt_plan_type"].(string)
+			}
+			if planType = strings.TrimSpace(planType); planType != "" {
+				a.Attributes["plan_type"] = planType
 			}
 		}
 	}

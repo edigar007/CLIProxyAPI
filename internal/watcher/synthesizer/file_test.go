@@ -48,6 +48,22 @@ func TestFileSynthesizer_Synthesize_EmptyAuthDir(t *testing.T) {
 	}
 }
 
+func TestSynthesizeAuthFileUsesExplicitCodexPlanWithoutIDToken(t *testing.T) {
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	auths, err := SynthesizeAuthFile(ctx, filepath.Join(t.TempDir(), "codex-pat.json"),
+		[]byte(`{"type":"codex","access_token":"at-test","account_id":"account-123","plan_type":"team"}`))
+	if err != nil || len(auths) != 1 {
+		t.Fatalf("synthesize Codex PAT: count=%d err=%v", len(auths), err)
+	}
+	if got := auths[0].Attributes["plan_type"]; got != "team" {
+		t.Fatalf("Codex PAT plan_type = %q, want team", got)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_NonExistentDir(t *testing.T) {
 	synth := NewFileSynthesizer()
 	ctx := &SynthesisContext{
