@@ -84,3 +84,22 @@ func TestIsCodexTerminalEmptyIncomplete(t *testing.T) {
 		t.Fatal("expected false for response.completed")
 	}
 }
+
+func TestIsCodexTerminalEmptyIncompletePreservesIntentionalInterrupt(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		want   bool
+	}{
+		{reason: "interrupted", want: false},
+		{reason: "max_output_tokens", want: true},
+		{reason: "content_filter", want: true},
+		{reason: "", want: true},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			event := []byte(`{"type":"response.incomplete","response":{"incomplete_details":{"reason":"` + tc.reason + `"},"output":[],"usage":{"output_tokens":0}}}`)
+			if got := IsCodexTerminalEmptyIncomplete(event, 0, false); got != tc.want {
+				t.Fatalf("empty incomplete = %t, want %t for reason %q", got, tc.want, tc.reason)
+			}
+		})
+	}
+}

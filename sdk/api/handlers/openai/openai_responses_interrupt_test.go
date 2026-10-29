@@ -33,16 +33,21 @@ import (
 // interrupts must fail locally without opening or writing that socket.
 func TestResponsesInterruptInFlight(t *testing.T) {
 	for _, tc := range []struct {
-		steering bool
-		faithful bool
+		steering     bool
+		faithful     bool
+		outputTokens int
 	}{
-		{steering: false, faithful: false},
-		{steering: true, faithful: false},
-		{steering: false, faithful: true},
-		{steering: true, faithful: true},
+		{steering: false, faithful: false, outputTokens: 0},
+		{steering: true, faithful: false, outputTokens: 0},
+		{steering: false, faithful: true, outputTokens: 0},
+		{steering: true, faithful: true, outputTokens: 0},
+		{steering: false, faithful: false, outputTokens: 7},
+		{steering: true, faithful: false, outputTokens: 7},
+		{steering: false, faithful: true, outputTokens: 7},
+		{steering: true, faithful: true, outputTokens: 7},
 	} {
-		steering, faithful := tc.steering, tc.faithful
-		t.Run(fmt.Sprintf("steering_%t/faithful_%t", steering, faithful), func(t *testing.T) {
+		steering, faithful, outputTokens := tc.steering, tc.faithful, tc.outputTokens
+		t.Run(fmt.Sprintf("steering_%t/faithful_%t/output_tokens_%d", steering, faithful, outputTokens), func(t *testing.T) {
 			interrupt := []byte(`{"type":"response.interrupt","response_id":"r1","mode":"discard_partial_items","extension":"keep"}`)
 			var connections atomic.Int32
 			upstreamDone := make(chan struct{})
@@ -79,7 +84,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 					t.Errorf("interrupt changed: %s", payload)
 					return
 				}
-				write(`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"usage":{"output_tokens":7},"output":[]}}`)
+				write(fmt.Sprintf(`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"usage":{"output_tokens":%d},"output":[]}}`, outputTokens))
 				if payload := read(); gjson.GetBytes(payload, "type").String() != "response.create" {
 					t.Errorf("expected follow-up response.create, got %s", payload)
 					return
@@ -96,7 +101,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 			manager := coreauth.NewManager(nil, nil, nil)
 			manager.SetConfig(cfg)
 			manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
-			authID := fmt.Sprintf("interrupt-%t-%t", steering, faithful)
+			authID := fmt.Sprintf("interrupt-%t-%t-%d", steering, faithful, outputTokens)
 			model := "interrupt-model-" + authID
 			_, errRegister := manager.Register(context.Background(), &coreauth.Auth{
 				ID:       authID,
